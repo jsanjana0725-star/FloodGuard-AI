@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   browserLocalPersistence,
   browserSessionPersistence,
@@ -7,113 +7,91 @@ import {
   sendPasswordResetEmail,
   setPersistence,
   signInWithEmailAndPassword,
-  signOut,
 } from '@firebase/auth'
 import { firebaseAuth, firebaseConfigured } from './firebase'
+import { fetchWeatherForPlace, geocodePlace } from './services/weatherService'
+import { fetchOfficialWarnings } from './services/warningsService'
+import { assessFloodRisk } from './risk/floodRiskEngine'
 import './App.css'
 
-const demoLocations = {
-  vijayawada: {
-    name: 'Vijayawada, India',
-    rainfall: '32.0',
-    temperature: '30',
-    feelsLike: '35',
-    humidity: '78',
-    wind: '13',
-    risk: 'Moderate',
-    riskScore: 54,
-    description: 'Sample scenario for exploring the dashboard layout.',
-    rainfallNote: 'Illustrative sample',
-    factors: [
-      { name: 'Rainfall intensity', value: 61, level: 'Elevated' },
-      { name: 'Drainage capacity', value: 53, level: 'Unknown' },
-      { name: 'River level', value: 38, level: 'Unknown' },
-    ],
-    alerts: [
-      { type: 'rain', title: 'Sample rainfall advisory', area: 'Demo zone A', time: 'Sample time', tone: 'amber' },
-      { type: 'water', title: 'Example community report', area: 'Demo zone B', time: 'Sample time', tone: 'blue' },
-      { type: 'info', title: 'Illustrative river notice', area: 'Sample waterway', time: 'Sample time', tone: 'slate' },
-    ],
-  },
-  mumbai: {
-    name: 'Mumbai, India',
-    rainfall: '38.4',
-    temperature: '29',
-    feelsLike: '34',
-    humidity: '84',
-    wind: '18',
-    risk: 'Moderate',
-    riskScore: 58,
-    description: 'Some low-lying areas may experience waterlogging.',
-    rainfallNote: 'Last 3 hours',
-    factors: [
-      { name: 'Rainfall intensity', value: 72, level: 'Elevated' },
-      { name: 'Drainage capacity', value: 48, level: 'Fair' },
-      { name: 'River level', value: 32, level: 'Normal' },
-    ],
-    alerts: [
-      { type: 'rain', title: 'Heavy rainfall watch', area: 'Andheri East', time: '18 min ago', tone: 'amber' },
-      { type: 'water', title: 'Waterlogging reported', area: 'Dadar West', time: '42 min ago', tone: 'blue' },
-      { type: 'info', title: 'High tide advisory', area: 'Bandra waterfront', time: '1 hr ago', tone: 'slate' },
-    ],
-  },
-  chennai: {
-    name: 'Chennai, India',
-    rainfall: '24.1',
-    temperature: '31',
-    feelsLike: '39',
-    humidity: '76',
-    wind: '14',
-    risk: 'Low',
-    riskScore: 29,
-    description: 'Conditions look stable across monitored demo areas.',
-    rainfallNote: 'Last 3 hours',
-    factors: [
-      { name: 'Rainfall intensity', value: 34, level: 'Low' },
-      { name: 'Drainage capacity', value: 76, level: 'Good' },
-      { name: 'River level', value: 22, level: 'Normal' },
-    ],
-    alerts: [
-      { type: 'info', title: 'Light rain expected', area: 'Adyar', time: '35 min ago', tone: 'blue' },
-      { type: 'water', title: 'Drain inspection complete', area: 'Velachery', time: '2 hrs ago', tone: 'slate' },
-    ],
-  },
-  bengaluru: {
-    name: 'Bengaluru, India',
-    rainfall: '16.8',
-    temperature: '24',
-    feelsLike: '25',
-    humidity: '68',
-    wind: '11',
-    risk: 'Low',
-    riskScore: 22,
-    description: 'No elevated flood indicators in this sample.',
-    rainfallNote: 'Last 3 hours',
-    factors: [
-      { name: 'Rainfall intensity', value: 25, level: 'Low' },
-      { name: 'Drainage capacity', value: 81, level: 'Good' },
-      { name: 'River level', value: 18, level: 'Normal' },
-    ],
-    alerts: [],
-  },
-  delhi: {
-    name: 'New Delhi, India',
-    rainfall: '8.2',
-    temperature: '32',
-    feelsLike: '33',
-    humidity: '54',
-    wind: '9',
-    risk: 'Low',
-    riskScore: 18,
-    description: 'No elevated flood indicators in this sample.',
-    rainfallNote: 'Last 3 hours',
-    factors: [
-      { name: 'Rainfall intensity', value: 16, level: 'Low' },
-      { name: 'Drainage capacity', value: 79, level: 'Good' },
-      { name: 'River level', value: 24, level: 'Normal' },
-    ],
-    alerts: [],
-  },
+function normalizeLocationText(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/\./g, '')
+    .replace(/[(),'’-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+let locationIndexPromise = null
+
+function loadLocationIndex() {
+  if (!locationIndexPromise) {
+    locationIndexPromise = import('./data/india-locations.json')
+      .then((module) => buildLocationEntries(module.default || module))
+      .catch((error) => {
+        locationIndexPromise = null
+        throw error
+      })
+  }
+  return locationIndexPromise
+}
+
+function buildLocationEntries(index) {
+  const entries = []
+  index.states.forEach((state) => {
+    entries.push({ name: state.name, state: state.name, kind: 'state', key: normalizeLocationText(state.name) })
+    state.districts.forEach((district) => {
+      entries.push({ name: district, state: state.name, kind: 'district', key: normalizeLocationText(district) })
+    })
+  })
+  index.places.forEach(([name, stateIndex]) => {
+    const state = index.states[stateIndex]
+    if (!state) return
+    entries.push({ name, state: state.name, kind: 'city', key: normalizeLocationText(name) })
+  })
+  return entries
+}
+
+const locationKindRank = { city: 3, district: 2, state: 1 }
+
+function findIndiaLocation(entries, rawQuery) {
+  const query = normalizeLocationText(rawQuery)
+  if (!query) return null
+
+  let best = null
+  let bestScore = 0
+
+  for (const entry of entries) {
+    let score = 0
+    if (entry.key === query) score = 100
+    else if (entry.key.startsWith(query)) score = 70
+    else if (entry.key.includes(` ${query}`)) score = 50
+    else if (entry.key.includes(query)) score = 30
+    if (score === 0) continue
+
+    const beatsBest =
+      score > bestScore ||
+      (score === bestScore && best !== null && locationKindRank[entry.kind] > locationKindRank[best.kind])
+    if (beatsBest) {
+      best = entry
+      bestScore = score
+    }
+  }
+
+  if (!best) return null
+  return {
+    name: best.name,
+    state: best.state,
+    kind: best.kind,
+    display: best.kind === 'state' ? best.name : `${best.name}, ${best.state}`,
+  }
+}
+
+function locationKindLabel(kind) {
+  if (kind === 'state') return 'State / UT'
+  if (kind === 'district') return 'District'
+  return 'City'
 }
 
 function Icon({ name, size = 20, strokeWidth = 1.8 }) {
@@ -166,7 +144,9 @@ function Icon({ name, size = 20, strokeWidth = 1.8 }) {
 function getRouteFromHash() {
   const route = window.location.hash.replace(/^#\/?/, '')
   if (route === 'login' || route === 'signup' || route === 'dashboard' || route === 'landing') return route
-  return route ? 'dashboard' : 'landing'
+  // The dashboard is public: an empty or unknown hash opens it directly,
+  // with no login required. Landing/auth stay reachable at #/landing, #/login.
+  return 'dashboard'
 }
 
 function getFirebaseErrorMessage(error) {
@@ -230,24 +210,11 @@ function App() {
     window.scrollTo(0, 0)
   }
 
-  async function handleLogout() {
-    if (firebaseAuth && user) {
-      try {
-        await signOut(firebaseAuth)
-      } catch (error) {
-        console.error('Firebase sign-out failed.', error)
-        setAuthStatusError('Could not sign out. Check your connection and try again.')
-        return
-      }
-    }
-    setAuthStatusError('')
-    navigate('landing')
-  }
-
   if (route === 'login') return <AuthPage key="login" mode="login" navigate={navigate} authStatusError={authStatusError} />
   if (route === 'signup') return <AuthPage key="signup" mode="signup" navigate={navigate} authStatusError={authStatusError} />
-  if (route === 'dashboard') return <Dashboard onLogout={handleLogout} user={user} authStatusError={authStatusError} />
-  return <LandingPage navigate={navigate} />
+  if (route === 'landing') return <LandingPage navigate={navigate} />
+  // Default public route — the dashboard is accessible without any login.
+  return <Dashboard authStatusError={authStatusError} />
 }
 
 function FloodIllustration() {
@@ -505,40 +472,186 @@ function AuthPage({ mode, navigate, authStatusError }) {
   )
 }
 
-function Dashboard({ onLogout, user, authStatusError }) {
-  const [location, setLocation] = useState(demoLocations.vijayawada)
+/* India states/UTs whose "capital" is a searchable city; used only to turn a
+   state name into a representative point so weather/warnings can be looked up.
+   This is a location-selection convenience, NOT sample data. */
+const STATE_HINTS = {
+  'andhra pradesh': 'Amaravati', 'arunachal pradesh': 'Itanagar', assam: 'Dispur',
+  bihar: 'Patna', chhattisgarh: 'Raipur', goa: 'Panaji', gujarat: 'Gandhinagar',
+  haryana: 'Chandigarh', 'himachal pradesh': 'Shimla', jharkhand: 'Ranchi',
+  karnataka: 'Bengaluru', kerala: 'Thiruvananthapuram',
+  'madhya pradesh': 'Bhopal', maharashtra: 'Mumbai', manipur: 'Imphal',
+  meghalaya: 'Shillong', mizoram: 'Aizawl', nagaland: 'Kohima', odisha: 'Bhubaneswar',
+  punjab: 'Chandigarh', rajasthan: 'Jaipur', sikkim: 'Gangtok', 'tamil nadu': 'Chennai',
+  telangana: 'Hyderabad', tripura: 'Agartala', 'uttar pradesh': 'Lucknow',
+  uttarakhand: 'Dehradun', 'west bengal': 'Kolkata',
+  delhi: 'New Delhi', 'jammu and kashmir': 'Srinagar', ladakh: 'Leh',
+  puducherry: 'Puducherry', chandigarh: 'Chandigarh',
+  'andaman and nicobar islands': 'Port Blair', 'dadra and nagar haveli and daman and diu': 'Daman',
+  lakshadweep: 'Kavaratti',
+}
+
+/* Pick a representative query to send to the geocoder for a resolved place. */
+function representativeSearchName(resolvedPlace) {
+  if (resolvedPlace.kind !== 'state') return resolvedPlace.name
+  return STATE_HINTS[normalizeLocationText(resolvedPlace.name)] || resolvedPlace.name
+}
+
+/* Map an engine assessment to the risk colour classes already used in the design. */
+function riskColorClass(category) {
+  const map = { Low: 'low', Moderate: 'moderate', High: 'high', Severe: 'severe' }
+  return map[category] || 'moderate'
+}
+
+/* Map an official IMD warning colour to a visual tone that matches the design. */
+function warningTone(level) {
+  const map = { red: 'amber', orange: 'amber', yellow: 'blue', green: 'slate' }
+  return map[level] || 'slate'
+}
+
+/* Colour used for each risk category in the (illustrative) map key. */
+function riskKeyClass(category) {
+  const map = { Low: 'low', Moderate: 'moderate', High: 'high', Severe: 'high' }
+  return map[category] || 'moderate'
+}
+
+/* "3 min ago" / "2 h ago" style relative time for last-updated stamps. */
+function formatRelative(iso) {
+  if (!iso) return null
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return null
+  const diffMs = Date.now() - date.getTime()
+  const mins = Math.max(0, Math.round(diffMs / 60000))
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins} min ago`
+  const hrs = Math.round(mins / 60)
+  if (hrs < 24) return `${hrs} h ago`
+  return `${Math.round(hrs / 24)} d ago`
+}
+
+function formatMm(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(1) : '—'
+}
+
+function Dashboard({ authStatusError }) {
+  const [place, setPlace] = useState(null)
+  const [weather, setWeather] = useState(null)
+  const [warnings, setWarnings] = useState(null)
+  const [assessment, setAssessment] = useState(null)
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [activeSection, setActiveSection] = useState('overview')
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [offline, setOffline] = useState(typeof navigator !== 'undefined' ? !navigator.onLine : false)
+  const searchSeqRef = useRef(0)
 
-  const isEmpty = location === null
+  useEffect(() => {
+    const update = () => setOffline(!navigator.onLine)
+    window.addEventListener('online', update)
+    window.addEventListener('offline', update)
+    return () => {
+      window.removeEventListener('online', update)
+      window.removeEventListener('offline', update)
+    }
+  }, [])
 
-  function handleSearch(event) {
-    event.preventDefault()
-    const normalizedQuery = query.trim().toLowerCase()
+  const hasPlace = place !== null
+  const placeLabel = place ? place.display : null
+  const weatherOk = Boolean(weather && weather.status === 'ok')
+  const a = assessment
+  const riskReady = Boolean(a && a.status === 'ok')
+  const riskCategory = riskReady ? a.category : null
+  const weatherSource = weatherOk ? weather.source : null
+  const lastUpdated = weatherOk ? weather.fetchedAt : null
+  const warningsSummary = a ? a.warnings : warnings
+  const cur = weatherOk ? weather.current : null
+  const rain = weatherOk ? weather.rainfall : null
+  const liveUnavailableDetail = weather && weather.status === 'error'
+    ? (weather.reason || 'Live weather data is unavailable.')
+    : hasPlace
+      ? 'Live weather data is unavailable for this location right now.'
+      : 'Search a location to load live data.'
+
+  async function runSearch(rawQuery) {
+    const normalizedQuery = String(rawQuery || '').trim()
 
     if (!normalizedQuery) {
-      setError('Enter a city name to search the demo locations.')
+      searchSeqRef.current += 1
+      setLoading(false)
+      setError('Enter a city, district, or state name to search.')
       return
     }
 
+    const seq = ++searchSeqRef.current
     setError('')
     setLoading(true)
+    setPlace(null)
+    setWeather(null)
+    setWarnings(null)
+    setAssessment(null)
 
-    window.setTimeout(() => {
-      const match = Object.values(demoLocations).find(
-        (item) => item.name.toLowerCase().includes(normalizedQuery),
-      )
-      setLocation(match || null)
-      setLoading(false)
-    }, 450)
+    try {
+      const entries = await loadLocationIndex()
+      if (searchSeqRef.current !== seq) return
+      const match = findIndiaLocation(entries, normalizedQuery)
+      if (!match) {
+        setError(`No location found for "${normalizedQuery}". Try a district, city, or state name across India.`)
+        setLoading(false)
+        return
+      }
+
+      // Resolve a representative point (states map to their capital city).
+      const geo = await geocodePlace({ name: representativeSearchName(match), state: match.state })
+      if (searchSeqRef.current !== seq) return
+      if (geo.status !== 'ok') {
+        setPlace(match)
+        setError(`Found ${match.display}, but could not resolve its coordinates, so live weather and official warnings are unavailable.`)
+        setLoading(false)
+        return
+      }
+
+      const resolvedPlace = {
+        name: match.name,
+        state: match.state,
+        kind: match.kind,
+        display: match.display,
+        lat: geo.place.lat,
+        lon: geo.place.lon,
+        label: geo.place.label || match.display,
+      }
+      setPlace(resolvedPlace)
+
+      // Fetch live weather and official warnings together, then run the engine.
+      const [weatherResult, warningsResult] = await Promise.all([
+        fetchWeatherForPlace({ name: geo.place.name, state: geo.place.state, lat: geo.place.lat, lon: geo.place.lon }),
+        fetchOfficialWarnings({ lat: geo.place.lat, lon: geo.place.lon }),
+      ])
+      if (searchSeqRef.current !== seq) return
+      setWeather(weatherResult)
+      setWarnings(warningsResult)
+      setAssessment(assessFloodRisk({ weather: weatherResult, warnings: warningsResult }))
+    } catch (loadError) {
+      if (searchSeqRef.current !== seq) return
+      console.error('Location search failed.', loadError)
+      setError('Could not complete the search. Check your connection and try again.')
+    } finally {
+      if (searchSeqRef.current === seq) setLoading(false)
+    }
   }
 
-  function chooseDemoCity(city) {
+  function handleSearch(event) {
+    event.preventDefault()
+    runSearch(query)
+  }
+
+  function quickSearch(city) {
     setQuery(city)
-    setError('')
+    runSearch(city)
+  }
+
+  function refresh() {
+    if (query.trim()) runSearch(query)
   }
 
   function selectSection(section) {
@@ -567,7 +680,7 @@ function Dashboard({ onLogout, user, authStatusError }) {
           </a>
           <a className={`nav-link ${activeSection === 'alerts' ? 'active' : ''}`} href="#alerts" onClick={() => selectSection('alerts')}>
             <Icon name="bell" size={18} /> <span>Alerts</span>
-            <span className="nav-count">{location?.alerts.length || 0}</span>
+            <span className="nav-count">{warningsSummary && warningsSummary.status === 'ok' ? (warningsSummary.entries || []).length : 0}</span>
           </a>
           <a className="nav-link" href="#reports" onClick={() => selectSection('reports')}>
             <Icon name="file" size={18} /> <span>Reports</span>
@@ -580,13 +693,12 @@ function Dashboard({ onLogout, user, authStatusError }) {
         <div className="sidebar-bottom">
           <div className="demo-note">
             <span className="demo-note-icon"><Icon name="shield" size={17} /></span>
-            <strong>Demo environment</strong>
-            <p>Sample information only. No live monitoring is connected.</p>
+            <strong>Public dashboard</strong>
+            <p>No sign-in required. Weather from Open-Meteo; warnings from IMD. The risk score is a provisional rules-based estimate, not an official forecast.</p>
           </div>
           <div className="profile">
             <div className="profile-avatar">FG</div>
-            <div className="profile-copy"><strong>{user?.email || 'FloodGuard team'}</strong><span>{user ? 'Signed in with Firebase' : 'Community workspace'}</span></div>
-            <button className="icon-button profile-more" aria-label="Log out" title="Log out" onClick={onLogout}><Icon name="logout" size={16} /></button>
+            <div className="profile-copy"><strong>{placeLabel || 'FloodGuard AI'}</strong><span>Public access · no login</span></div>
           </div>
         </div>
       </aside>
@@ -595,13 +707,14 @@ function Dashboard({ onLogout, user, authStatusError }) {
 
       <main className="main-panel">
         {authStatusError && <div className="auth-error dashboard-auth-error" role="alert"><Icon name="alert" size={16} /><span>{authStatusError}</span></div>}
+        {offline && <div className="auth-error dashboard-auth-error" role="status"><Icon name="alert" size={16} /><span>You appear to be offline. Live weather and warnings cannot be refreshed until you reconnect.</span></div>}
         <header className="topbar">
           <button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}>
             <Icon name="menu" size={20} />
           </button>
           <form className="location-search topbar-search" onSubmit={handleSearch} noValidate>
             <Icon name="search" size={17} />
-            <label className="sr-only" htmlFor="location-search">Search a demo city</label>
+            <label className="sr-only" htmlFor="location-search">Search an Indian city, district, or state</label>
             <input
               id="location-search"
               value={query}
@@ -609,57 +722,57 @@ function Dashboard({ onLogout, user, authStatusError }) {
                 setQuery(event.target.value)
                 if (error) setError('')
               }}
-              placeholder="Search a demo city (e.g. Mumbai)"
+              placeholder="Search a city, district, or state (e.g. Pune)"
               aria-invalid={Boolean(error)}
               aria-describedby={error ? 'search-error' : 'search-hint'}
             />
-            <button type="submit" aria-label={loading ? 'Searching demo locations' : 'Search demo locations'} disabled={loading}><Icon name="search" size={16} /></button>
+            <button type="submit" aria-label={loading ? 'Searching locations' : 'Search locations across India'} disabled={loading}><Icon name="search" size={16} /></button>
           </form>
           <div className="topbar-actions">
-            {!isEmpty && <div className="header-weather"><span className="header-weather-icon"><Icon name="sun" size={21} /></span><span><strong>{location.temperature}°C</strong><small>Sample weather</small></span></div>}
-            <span className="demo-pill"><span className="status-dot" /> DEMO DATA</span>
-            <button className="icon-button notification-button" aria-label="Notifications">
-              <Icon name="bell" size={19} /><i />
+            {weatherOk && cur && <div className="header-weather"><span className="header-weather-icon"><Icon name="thermometer" size={21} /></span><span><strong>{cur.temperatureC != null ? `${cur.temperatureC}°C` : '—'}</strong><small>Live · {formatRelative(lastUpdated)}</small></span></div>}
+            <span className="demo-pill"><span className="status-dot" /> {weatherOk ? 'LIVE DATA' : hasPlace ? 'NO LIVE DATA' : 'READY'}</span>
+            <button className="icon-button notification-button" type="button" aria-label="Refresh live data" onClick={refresh} disabled={loading || !query.trim()}>
+              <Icon name="clock" size={19} /><i />
             </button>
-            <div className="top-user"><div className="top-avatar" aria-label={user ? 'Signed-in user' : 'Demo user'}>FG</div><span>{user?.email || 'Demo workspace'}</span><button className="dashboard-logout" type="button" onClick={onLogout}><Icon name="logout" size={14} /> Log out</button></div>
           </div>
         </header>
 
         <div className="page-content">
           <section className="welcome-row">
             <div>
-              <div className="eyebrow"><span className="eyebrow-line" /> CITY MONITORING · DEMO</div>
-              <h1>Welcome to FloodGuard AI</h1>
-              <p className="welcome-subtitle">Explore sample flood and urban waterlogging indicators.</p>
+              <div className="eyebrow"><span className="eyebrow-line" /> LIVE FLOOD MONITORING · INDIA</div>
+              <h1>Flood risk dashboard</h1>
+              <p className="welcome-subtitle">Live rainfall, a provisional flood-risk estimate, and official IMD warnings for any location in India.</p>
             </div>
             <div className="welcome-actions">
-              <div className="selected-location"><Icon name="location" size={16} /><span>{isEmpty ? 'No demo location' : location.name}</span><Icon name="chevron" size={13} /></div>
-              <div className="date-chip"><Icon name="clock" size={16} /> <span>Sample data</span></div>
+              <div className="selected-location"><Icon name="location" size={16} /><span>{placeLabel || 'No location selected'}</span><Icon name="chevron" size={13} /></div>
+              <div className="date-chip"><Icon name="clock" size={16} /> <span>{lastUpdated ? `Updated ${formatRelative(lastUpdated)}` : hasPlace ? 'No live reading' : 'Search to begin'}</span></div>
             </div>
           </section>
 
           <section className="search-row" aria-label="Location search status">
             <p className="search-hint" id={error ? 'search-error' : 'search-hint'}>
-              {error ? <span className="error-text" role="alert">{error}</span> : <>Search demo locations: <button type="button" onClick={() => chooseDemoCity('Vijayawada')}>Vijayawada</button>, <button type="button" onClick={() => chooseDemoCity('Mumbai')}>Mumbai</button>, <button type="button" onClick={() => chooseDemoCity('Chennai')}>Chennai</button>, <button type="button" onClick={() => chooseDemoCity('Bengaluru')}>Bengaluru</button></>}
+              {error ? <span className="error-text" role="alert">{error}</span> : <>{loading ? 'Searching the India location list…' : <>Search any city, district, or state in India — try: <button type="button" onClick={() => quickSearch('Mumbai')}>Mumbai</button>, <button type="button" onClick={() => quickSearch('Chennai')}>Chennai</button>, <button type="button" onClick={() => quickSearch('Kolkata')}>Kolkata</button>, <button type="button" onClick={() => quickSearch('Guwahati')}>Guwahati</button></>}</>}
             </p>
           </section>
 
           <div className="current-location">
             <span className="location-pin"><Icon name="location" size={16} /></span>
-            <strong>{isEmpty ? 'No matching demo location' : location.name}</strong>
+            <strong>{placeLabel || 'No matching location'}</strong>
             <span className="location-separator">·</span>
-            <span>{isEmpty ? 'Search another city to continue' : 'Sample conditions · not live'}</span>
-            <span className="sample-tag"><span /> SAMPLE</span>
+            <span>{place ? `${locationKindLabel(place.kind)} · ${place.state || place.label}` : 'Search a city, district, or state to continue'}</span>
+            {weatherSource && <span className="info-tag"><Icon name="info" size={13} /> {weatherSource.name}</span>}
+            <span className="sample-tag"><span /> {weatherOk ? 'LIVE' : hasPlace ? 'NO LIVE DATA' : 'READY'}</span>
           </div>
 
-          <section className="metrics-grid" aria-label="Weather information">
+          <section className="metrics-grid" aria-label="Current weather">
             <MetricCard
-              title="Rainfall"
+              title="Rainfall (last 24 h)"
               icon="rain"
               iconClass="metric-icon-blue"
-              value={loading || isEmpty ? '—' : location.rainfall}
-              unit={loading || isEmpty ? '' : 'mm'}
-              detail={loading ? 'Loading demo data…' : isEmpty ? 'No sample available' : location.rainfallNote}
+              value={loading ? '—' : rain && rain.last24hMm != null ? rain.last24hMm.toFixed(1) : '—'}
+              unit={rain && rain.last24hMm != null ? 'mm' : ''}
+              detail={loading ? 'Loading live data…' : weatherOk ? `Next 24 h forecast: ${formatMm(rain.next24hMm)} mm` : liveUnavailableDetail}
               visual="rain-chart"
               loading={loading}
             />
@@ -667,9 +780,9 @@ function Dashboard({ onLogout, user, authStatusError }) {
               title="Temperature"
               icon="thermometer"
               iconClass="metric-icon-orange"
-              value={loading || isEmpty ? '—' : location.temperature}
-              unit={loading || isEmpty ? '' : '°C'}
-              detail={loading ? 'Loading demo data…' : isEmpty ? 'No sample available' : `Feels like ${location.feelsLike}°`}
+              value={loading ? '—' : cur && cur.temperatureC != null ? cur.temperatureC : '—'}
+              unit={cur && cur.temperatureC != null ? '°C' : ''}
+              detail={loading ? 'Loading live data…' : weatherOk ? 'Current temperature' : liveUnavailableDetail}
               visual="temperature-chart"
               loading={loading}
             />
@@ -677,9 +790,9 @@ function Dashboard({ onLogout, user, authStatusError }) {
               title="Humidity"
               icon="humidity"
               iconClass="metric-icon-violet"
-              value={loading || isEmpty ? '—' : location.humidity}
-              unit={loading || isEmpty ? '' : '%'}
-              detail={loading ? 'Loading demo data…' : isEmpty ? 'No sample available' : 'High moisture'}
+              value={loading ? '—' : cur && cur.humidityPct != null ? cur.humidityPct : '—'}
+              unit={cur && cur.humidityPct != null ? '%' : ''}
+              detail={loading ? 'Loading live data…' : weatherOk ? 'Relative humidity' : liveUnavailableDetail}
               visual="humidity-chart"
               loading={loading}
             />
@@ -687,9 +800,9 @@ function Dashboard({ onLogout, user, authStatusError }) {
               title="Wind speed"
               icon="wind"
               iconClass="metric-icon-green"
-              value={loading || isEmpty ? '—' : location.wind}
-              unit={loading || isEmpty ? '' : 'km/h'}
-              detail={loading ? 'Loading demo data…' : isEmpty ? 'No sample available' : 'Light breeze'}
+              value={loading ? '—' : cur && cur.windKmh != null ? cur.windKmh : '—'}
+              unit={cur && cur.windKmh != null ? 'km/h' : ''}
+              detail={loading ? 'Loading live data…' : weatherOk ? 'Current wind speed' : liveUnavailableDetail}
               visual="wind-chart"
               loading={loading}
             />
@@ -697,131 +810,182 @@ function Dashboard({ onLogout, user, authStatusError }) {
 
           <section className="dashboard-grid" id="overview">
             <article className="panel map-panel" id="map">
-              <PanelHeading title="Flood risk map" subtitle="Illustrative area view · no live map data">
-                <div className="map-heading-key"><span><i className="key-low" /> Low</span><span><i className="key-moderate" /> Moderate</span><span><i className="key-high" /> High</span></div>
+              <PanelHeading title="Area view" subtitle="Illustrative layout · not a live flood map">
+                <div className="map-heading-key"><span><i className={`key-${riskKeyClass(riskCategory || 'Low')}`} /> {riskCategory || 'Unknown'}</span></div>
               </PanelHeading>
-              {loading ? <LoadingState label="Loading demo map…" /> : isEmpty ? <EmptyState icon="map" title="Map preview unavailable" detail="No sample map is available for this search." /> : (
+              {loading ? <LoadingState label="Loading location data…" /> : !hasPlace ? <EmptyState icon="map" title="No location selected" detail="Search a city, district, or state across India to see its conditions." /> : (
                 <>
-                  <div className="map-illustration" role="img" aria-label={`Illustrative demo risk map for ${location.name}`}>
+                  <div className="map-illustration" role="img" aria-label={`Illustrative area view for ${placeLabel}`}>
                     <svg className="map-lines" viewBox="0 0 600 310" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
                       <rect width="600" height="310" fill="#eaf3f4" />
                       <path d="M-30 43 100 76 177 45l86 30 95-18 87 42 95-33 93 19M-15 121l106-14 78 34 95-23 105 34 103-31 111 30M-14 223l122-43 83 31 99-44 90 38 101-43 117 23M57-17l31 73-23 76 49 77-21 113M191-11l-8 65 41 82-38 79 22 112M343-22l-27 68 52 71-32 85 38 105M489-17l-31 88 51 55-19 67 37 105" fill="none" stroke="#fff" strokeWidth="12" strokeLinecap="round" strokeLinejoin="round" />
                       <path d="M-30 43 100 76 177 45l86 30 95-18 87 42 95-33 93 19M-15 121l106-14 78 34 95-23 105 34 103-31 111 30M-14 223l122-43 83 31 99-44 90 38 101-43 117 23M57-17l31 73-23 76 49 77-21 113M191-11l-8 65 41 82-38 79 22 112M343-22l-27 68 52 71-32 85 38 105M489-17l-31 88 51 55-19 67 37 105" fill="none" stroke="#d6e2e3" strokeWidth="1.5" strokeDasharray="3 4" strokeLinecap="round" strokeLinejoin="round" />
                       <path d="M49 202c46-42 63-28 103-54s59-4 89-31 43-5 73-19 53 7 76-16 53-9 80-39 60-2 93-23" fill="none" stroke="#79c9d6" strokeWidth="7" strokeLinecap="round" opacity=".9" />
-                      <path d="M167 75c35 1 52 19 59 45s-1 42-23 53-48 5-60-15-7-55 24-83Z" fill="#f6b660" opacity=".28" />
-                      <path d="M365 173c26-28 62-25 83-8s29 43 13 66-50 31-77 18-42-48-19-76Z" fill="#ec876b" opacity=".25" />
-                      <path d="M170 91c23-18 47-6 53 13 8 24-6 40-28 43s-38-11-35-30c1-11 3-18 10-26ZM388 181c18-14 41-6 46 11 7 20-7 35-26 35s-32-12-27-29c1-7 3-12 7-17Z" fill="#f0a448" opacity=".42" />
-                      <circle cx="201" cy="125" r="7" fill="#fff" stroke="#e59639" strokeWidth="3" />
-                      <circle cx="412" cy="204" r="7" fill="#fff" stroke="#e87559" strokeWidth="3" />
-                      <circle cx="320" cy="96" r="5" fill="#fff" stroke="#55abc0" strokeWidth="2.5" />
                     </svg>
-                    <span className="map-label label-one"><i /> Demo zone A</span>
-                    <span className="map-label label-two"><i /> Demo zone B</span>
-                    <span className="map-label label-three"><i /> Sample waterway</span>
-                    <div className="map-stamp"><Icon name="location" size={13} /> DEMO MAP</div>
+                    <div className="map-stamp"><Icon name="location" size={13} /> {place.kind === 'state' ? 'STATE VIEW' : 'AREA VIEW'}</div>
                   </div>
-                  <div className="map-footnote"><Icon name="info" size={15} /><span>Zones are illustrative and do not represent live conditions.</span></div>
+                  <div className="map-footnote"><Icon name="info" size={15} /><span>Generic layout only — FloodGuard AI does not publish a real-time flood map. Use official IMD and district notices for ground conditions.</span></div>
                 </>
               )}
             </article>
 
             <article className="panel risk-panel">
-              <PanelHeading title="Flood risk overview" subtitle="A demo indicator based on sample conditions">
-                <span className="info-tag"><Icon name="activity" size={13} /> DEMO</span>
+              <PanelHeading title="Flood risk estimate" subtitle="Provisional, weather-based · not an official warning">
+                {riskReady && <span className="info-tag"><Icon name="activity" size={13} /> {a.confidence === 'high' ? 'HIGH CONFIDENCE' : 'MEDIUM CONFIDENCE'}</span>}
               </PanelHeading>
-              {loading ? <LoadingState label="Loading sample risk overview…" /> : isEmpty ? <EmptyState icon="map" title="No demo risk data" detail="Choose one of the sample cities above to view its risk overview." /> : (
+              {loading ? <LoadingState label="Calculating flood risk…" /> : !hasPlace ? (
+                <EmptyState icon="map" title="No location selected" detail="Search a location to estimate its flood risk from live rainfall and official warnings." />
+              ) : a && a.status !== 'ok' ? (
+                <div className="risk-unavailable">
+                  <span className="empty-icon"><Icon name="alert" size={18} /></span>
+                  <div>
+                    <strong>Risk score unavailable</strong>
+                    {(a.notes || []).map((note, i) => <p key={i}>{note}</p>)}
+                  </div>
+                </div>
+              ) : riskReady ? (
                 <>
                   <div className="risk-summary">
-                    <div className={`risk-meter risk-${location.risk.toLowerCase()}`} style={{ '--risk-progress': `${location.riskScore * 0.75}%` }}>
+                    <div className={`risk-meter risk-${riskColorClass(a.category)}`} style={{ '--risk-progress': `${a.score * 0.75}%` }}>
                       <div className="risk-meter-inner">
-                        <strong>{location.riskScore}</strong>
+                        <strong>{a.score}</strong>
                         <span>out of 100</span>
                       </div>
                     </div>
                     <div className="risk-copy">
-                      <span className={`risk-label risk-label-${location.risk.toLowerCase()}`}><span /> {location.risk} risk</span>
-                      <h3>{location.description}</h3>
-                      <p>Illustrative score only — not a forecast or official warning.</p>
+                      <span className={`risk-label risk-label-${riskColorClass(a.category)}`}><span /> {a.category} risk</span>
+                      <h3>{a.safety ? a.safety.title : 'Estimated conditions'}</h3>
+                      <p>Provisional estimate from a rules-based heuristic — not an official warning and not a confirmed flood event.</p>
                     </div>
                   </div>
-                  <div className="risk-scale" aria-label="Risk scale: low, moderate, high">
-                    <span>Low</span><span>Moderate</span><span>High</span>
+                  <div className="risk-scale" aria-label="Risk scale: low, moderate, high, severe">
+                    <span>Low</span><span>Moderate</span><span>High</span><span>Severe</span>
                   </div>
-                  <div className="factors-heading"><strong>Contributing factors</strong><span>DEMO VALUES</span></div>
+                  {a.categorySource === 'official-warning-floor' && warningsSummary && warningsSummary.status === 'ok' && (
+                    <div className="risk-note" role="note"><Icon name="bell" size={14} /> Category raised to <strong>{a.category}</strong> by an official IMD {warningsSummary.level} warning for {warningsSummary.district || 'this district'}.</div>
+                  )}
+                  <div className="factors-heading"><strong>Contributing factors</strong><span>WEATHER INPUTS</span></div>
                   <div className="factor-list">
-                    {location.factors.map((factor) => (
-                      <div className="factor-row" key={factor.name}>
-                        <span className="factor-name">{factor.name}</span>
-                        <div className="factor-track"><span style={{ width: `${factor.value}%` }} /></div>
-                        <span className="factor-level">{factor.level}</span>
+                    {a.factors.map((factor) => (
+                      <div className="factor-row" key={factor.key}>
+                        <span className="factor-name">{factor.label}</span>
+                        <div className="factor-track"><span style={{ width: `${factor.maxPoints ? Math.round((factor.points / factor.maxPoints) * 100) : 0}%` }} /></div>
+                        <span className="factor-level">{factor.points}/{factor.maxPoints}</span>
                       </div>
                     ))}
                   </div>
+                  <div className="risk-detail"><Icon name="info" size={13} /> {a.factors.map((f) => f.detail).join(' · ')}</div>
                 </>
-              )}
+              ) : null}
             </article>
 
             <article className="panel alerts-panel" id="alerts">
-            <PanelHeading title="Recent alerts" subtitle="Sample community updates for this demo">
-              {!loading && !isEmpty && location.alerts.length > 0 && <button className="text-button" type="button" onClick={() => selectSection('alerts')}>View all <Icon name="arrow" size={14} /></button>}
-            </PanelHeading>
-            {loading ? <LoadingState label="Loading sample alerts…" compact /> : isEmpty ? <EmptyState icon="search" title="No demo alerts to show" detail="Search a sample city to view its example alerts." compact /> : location.alerts.length === 0 ? (
-              <EmptyState icon="check" title="All clear in this demo" detail="There are no sample alerts for this location." compact />
-            ) : (
-              <div className="alerts-list">
-                {location.alerts.map((alert) => (
-                  <div className="alert-row" key={`${alert.title}-${alert.area}`}>
-                    <div className={`alert-icon alert-${alert.tone}`}><Icon name={alert.type === 'rain' ? 'rain' : alert.type === 'water' ? 'droplets' : 'activity'} size={18} /></div>
-                    <div className="alert-copy"><strong>{alert.title}</strong><span><Icon name="location" size={13} /> {alert.area}</span></div>
-                    <span className={`alert-type type-${alert.tone}`}>{alert.type === 'rain' ? 'WEATHER' : alert.type === 'water' ? 'COMMUNITY' : 'ADVISORY'}</span>
-                    <span className="alert-time">{alert.time}</span>
-                    <button className="alert-open icon-button" aria-label={`Open ${alert.title}`}><Icon name="chevron" size={17} /></button>
+              <PanelHeading title="Official warnings" subtitle={warningsSummary && warningsSummary.source ? warningsSummary.source.name : 'Official alerts only — no invented alerts'}>
+                {warningsSummary && warningsSummary.status === 'ok' && (warningsSummary.entries || []).length > 0 && <button className="text-button" type="button" onClick={() => selectSection('alerts')}>Details <Icon name="arrow" size={14} /></button>}
+              </PanelHeading>
+              {loading ? <LoadingState label="Checking official warnings…" compact /> : !hasPlace ? (
+                <EmptyState icon="bell" title="No location selected" detail="Search a location to check for official IMD warnings." compact />
+              ) : warningsSummary && warningsSummary.status === 'ok' ? (
+                (warningsSummary.entries || []).length === 0 ? (
+                  <EmptyState icon="check" title="No official warning in effect" detail={`IMD shows no colour warning for ${warningsSummary.district || 'this district'} at the moment.`} compact />
+                ) : (
+                  <div className="alerts-list">
+                    {warningsSummary.entries.slice(0, 4).map((entry) => (
+                      <div className="alert-row" key={`${entry.label}-${entry.date}`}>
+                        <div className={`alert-icon alert-${warningTone(entry.level)}`}><Icon name="alert" size={18} /></div>
+                        <div className="alert-copy"><strong>{entry.detail || `IMD ${entry.level} warning`}</strong><span><Icon name="location" size={13} /> {warningsSummary.district || 'District'}{warningsSummary.state ? `, ${warningsSummary.state}` : ''}</span></div>
+                        <span className={`alert-type type-${warningTone(entry.level)}`}>{(entry.level || '').toUpperCase()}</span>
+                        <span className="alert-time">{entry.label}</span>
+                        <span className="alert-open icon-button" aria-hidden="true"><Icon name="chevron" size={17} /></span>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            )}
+                )
+              ) : (
+                <EmptyState icon="info" title="Official warnings unavailable" detail={(warningsSummary && warningsSummary.reason) || 'The official warning source could not be reached from this browser. The risk estimate is weather-only.'} compact />
+              )}
+              {warningsSummary && warningsSummary.status === 'ok' && warningsSummary.updatedAt && (
+                <div className="map-footnote"><Icon name="clock" size={13} /><span>IMD warnings updated {new Date(warningsSummary.updatedAt).toLocaleString()}{warningsSummary.approximate ? ' · matched to nearest district polygon' : ''}</span></div>
+              )}
             </article>
           </section>
 
           <section className="lower-grid" aria-label="Additional dashboard panels">
             <article className="panel trend-panel">
-              <PanelHeading title="Rainfall trend" subtitle="Illustrative demo series · not observed data">
+              <PanelHeading title="Rainfall trend" subtitle={weatherOk ? 'Observed accumulation from live model data' : 'Live rainfall data unavailable'}>
                 <span className="trend-unit">mm</span>
               </PanelHeading>
-              <div className="trend-chart" role="img" aria-label="Illustrative sample rainfall trend over seven days">
-                <div className="chart-axis"><span>60</span><span>40</span><span>20</span><span>0</span></div>
-                <div className="chart-grid"><i /><i /><i /><i /></div>
-                <div className="chart-bars">
-                  {[22, 35, 28, 48, 56, 72, 61].map((height, index) => (
-                    <div className="chart-column" key={index}><span className="chart-bar" style={{ height: `${height}%` }} /><small>{['M', 'T', 'W', 'T', 'F', 'S', 'S'][index]}</small></div>
-                  ))}
-                </div>
-              </div>
+              {loading ? <LoadingState label="Loading rainfall…" compact /> : !weatherOk ? (
+                <EmptyState icon="rain" title="No live rainfall data" detail={liveUnavailableDetail} compact />
+              ) : (
+                <RainfallChart rainfall={rain} />
+              )}
             </article>
             <article className="panel quick-panel" id="reports">
-              <PanelHeading title="Quick actions" subtitle="Explore this demo dashboard" />
+              <PanelHeading title="Quick actions" subtitle="Explore the live dashboard" />
               <div className="quick-actions">
-                <a className="quick-action" href="#map" onClick={() => selectSection('map')}><span><Icon name="map" size={18} /></span><strong>View risk map</strong><small>Illustrative zones</small></a>
-                <a className="quick-action" href="#alerts" onClick={() => selectSection('alerts')}><span><Icon name="bell" size={18} /></span><strong>View alerts</strong><small>Sample updates</small></a>
-                <button className="quick-action" type="button" onClick={() => { chooseDemoCity('Vijayawada'); document.getElementById('location-search')?.focus() }}><span><Icon name="search" size={18} /></span><strong>Search a city</strong><small>Demo locations only</small></button>
+                <a className="quick-action" href="#map" onClick={() => selectSection('map')}><span><Icon name="map" size={18} /></span><strong>Area view</strong><small>Selected location</small></a>
+                <a className="quick-action" href="#alerts" onClick={() => selectSection('alerts')}><span><Icon name="bell" size={18} /></span><strong>Official warnings</strong><small>IMD district alerts</small></a>
+                <button className="quick-action" type="button" onClick={() => { setQuery(''); setError(''); document.getElementById('location-search')?.focus() }}><span><Icon name="search" size={18} /></span><strong>Search a location</strong><small>Any city, district, state</small></button>
                 <a className="quick-action" href="#settings" onClick={() => selectSection('settings')}><span><Icon name="info" size={18} /></span><strong>Data notes</strong><small>Sources & limitations</small></a>
               </div>
             </article>
             <article className="panel forecast-panel" id="settings">
-              <PanelHeading title="Weather forecast" subtitle="Live forecast not connected">
-                <span className="forecast-badge">NOT AVAILABLE</span>
+              <PanelHeading title="Forecast & data" subtitle={weatherOk ? 'Next days · precipitation forecast' : 'Forecast unavailable'}>
+                {weatherOk && <span className="forecast-badge type-blue">LIVE</span>}
               </PanelHeading>
-              <div className="forecast-empty">
-                <span><Icon name="cloud" size={23} /></span>
-                <strong>No forecast provider connected</strong>
-                <p>Forecast cards will appear when a verified weather source is integrated.</p>
-              </div>
+              {loading ? <LoadingState label="Loading forecast…" compact /> : weatherOk && weather.forecast && weather.forecast.daily && weather.forecast.daily.length > 0 ? (
+                <div className="forecast-cards">
+                  {weather.forecast.daily.map((day) => (
+                    <div className="forecast-card" key={day.date}>
+                      <span className="forecast-day">{dayLabel(day.date)}</span>
+                      <Icon name="rain" size={18} />
+                      <strong>{day.precipitationMm != null ? `${day.precipitationMm.toFixed(1)} mm` : '—'}</strong>
+                      <small>{day.probabilityPct != null ? `${day.probabilityPct}% chance` : 'chance n/a'}</small>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="forecast-empty">
+                  <span><Icon name="cloud" size={23} /></span>
+                  <strong>{hasPlace ? 'Forecast unavailable' : 'No location selected'}</strong>
+                  <p>{hasPlace ? liveUnavailableDetail : 'Search a location to load its live forecast.'}</p>
+                </div>
+              )}
+              {a && (
+                <div className="data-notes">
+                  <div className="data-notes-row"><Icon name="clock" size={13} /> <span>Weather updated {lastUpdated ? formatRelative(lastUpdated) : 'unavailable'}</span></div>
+                  {(a.dataSources || []).map((src, i) => <div className="data-notes-row" key={i}><Icon name="info" size={13} /> <span>{src.name}</span></div>)}
+                  <div className="data-notes-row"><Icon name="shield" size={13} /> <span>{a.engine ? `${a.engine.id} ${a.engine.version}` : 'Provisional heuristic'}</span></div>
+                </div>
+              )}
             </article>
           </section>
 
+          {a && a.safety && (
+            <section className="safety-panel" aria-label="Safety guidance">
+              <div className="safety-head">
+                <span className="safety-badge"><Icon name="shield" size={16} /></span>
+                <div>
+                  <strong>{a.category} risk — {a.safety.title}</strong>
+                  <p>General safety guidance for the estimated risk level. Always follow official instructions from IMD and your local authorities.</p>
+                </div>
+              </div>
+              <ul className="safety-list">
+                {a.safety.actions.map((action, i) => <li key={i}><Icon name="check" size={14} /> {action}</li>)}
+              </ul>
+              {a.limitations && a.limitations.length > 0 && (
+                <details className="safety-limitations">
+                  <summary>About this estimate &amp; its limitations</summary>
+                  <ul>{a.limitations.map((lim, i) => <li key={i}>{lim}</li>)}</ul>
+                </details>
+              )}
+            </section>
+          )}
+
           <footer className="page-footer">
-            <span><Icon name="shield" size={15} /> FloodGuard AI <span className="footer-separator">·</span> A hackathon demo</span>
-            <span>Sample data only — not for emergency decisions.</span>
+            <span><Icon name="shield" size={15} /> FloodGuard AI <span className="footer-separator">·</span> Public live dashboard</span>
+            <span>Weather: Open-Meteo · Warnings: IMD. Provisional estimate — not for emergency decisions.</span>
           </footer>
         </div>
       </main>
@@ -843,7 +1007,7 @@ function MetricCard({ title, icon, iconClass, value, unit, detail, visual, loadi
     <article className="metric-card">
       <div className="metric-top"><span>{title}</span><span className={`metric-icon ${iconClass}`}><Icon name={icon} size={17} /></span></div>
       <div className="metric-value">{loading ? <span className="skeleton skeleton-value" /> : <><strong>{value}</strong><span>{unit}</span></>}</div>
-      <div className={`metric-detail ${loading ? 'muted' : ''}`}>{loading ? 'Loading demo data…' : detail}</div>
+      <div className={`metric-detail ${loading ? 'muted' : ''}`}>{loading ? 'Loading live data…' : detail}</div>
       <div className={`metric-visual ${visual}`} aria-hidden="true"><span /><span /><span /><span /><span /><span /><span /><span /></div>
     </article>
   )
@@ -858,6 +1022,61 @@ function EmptyState({ icon, title, detail, compact = false }) {
     <div className={`empty-state ${compact ? 'empty-compact' : ''}`}>
       <span className="empty-icon"><Icon name={icon} size={18} /></span>
       <div><strong>{title}</strong><p>{detail}</p></div>
+    </div>
+  )
+}
+
+/* "Today" / "Tomorrow" / weekday for an ISO date string. */
+function dayLabel(isoDate) {
+  if (!isoDate) return '—'
+  const date = new Date(`${isoDate}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return isoDate
+  const today = new Date()
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  const startOfTarget = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  const dayDiff = Math.round((startOfTarget - startOfToday) / 86400000)
+  if (dayDiff === 0) return 'Today'
+  if (dayDiff === 1) return 'Tomorrow'
+  return date.toLocaleDateString([], { weekday: 'short' })
+}
+
+/*
+ * Live rainfall chart built from the engine's rainfall windows. Shows observed
+ * accumulation (last 24 / 48 / 72 h) and the forecast next-24 h total, so every
+ * bar is a real value from the weather service — never a placeholder.
+ */
+function RainfallChart({ rainfall }) {
+  const bars = [
+    { label: '24 h ago', value: rainfall.last24hMm, kind: 'past' },
+    { label: '48 h ago', value: rainfall.last48hMm, kind: 'past' },
+    { label: '72 h ago', value: rainfall.last72hMm, kind: 'past' },
+    { label: 'Next 24 h', value: rainfall.next24hMm, kind: 'future' },
+  ]
+  const present = bars.filter((b) => typeof b.value === 'number' && Number.isFinite(b.value))
+  const maxValue = present.length ? Math.max(...present.map((b) => b.value), 1) : 1
+  const axisTop = Math.ceil(maxValue / 20) * 20 || 20
+
+  return (
+    <div className="trend-chart" role="img" aria-label="Observed and forecast rainfall accumulation in millimetres">
+      <div className="chart-axis"><span>{axisTop}</span><span>{Math.round(axisTop / 2)}</span><span>0</span></div>
+      <div className="chart-grid"><i /><i /><i /></div>
+      <div className="chart-bars">
+        {bars.map((bar) => {
+          const has = typeof bar.value === 'number' && Number.isFinite(bar.value)
+          const height = has ? Math.max(4, Math.round((bar.value / axisTop) * 100)) : 0
+          return (
+            <div className="chart-column" key={bar.label}>
+              <span
+                className={`chart-bar ${has ? '' : 'chart-bar-empty'} ${bar.kind === 'future' ? 'chart-bar-forecast' : ''}`}
+                style={{ height: `${height}%` }}
+                title={has ? `${bar.label}: ${bar.value.toFixed(1)} mm` : `${bar.label}: no data`}
+              />
+              <small>{bar.label}</small>
+            </div>
+          )
+        })}
+      </div>
+      <div className="trend-footnote">Faded bars are observed accumulation; the highlighted bar is the next-24 h forecast. Values in mm from Open-Meteo.</div>
     </div>
   )
 }

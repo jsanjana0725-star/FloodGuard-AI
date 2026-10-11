@@ -33,16 +33,31 @@ npm run preview
 
 ## Using the demo dashboard
 
-- Search for **Vijayawada**, **Mumbai**, **Chennai**, **Bengaluru**, or **Delhi** to switch between sample datasets.
-- Search for another city to see the no-demo-data state. Submitting an empty search shows a validation message.
+- **India-wide location search:** the top search box accepts any **city, district, or state/UT in India** (for example *Pune*, *Wayanad*, *Telangana*). The location list is bundled with the app (`src/data/india-locations.json` — 36 states/UTs, 649 districts, ~7,700 cities and towns), so search works offline and needs no API key or paid service.
+- **Sample readings are limited to five demo cities.** Searching **Vijayawada**, **Mumbai**, **Chennai**, **Bengaluru**, or **Delhi** switches to the illustrative sample dataset. Any other location resolves and is displayed, but weather, risk, map, and alert panels stay empty with an explicit "no sample data" message — the app never invents readings for unlisted locations.
+- Submitting an unknown place, an empty search, or hitting a network problem while loading the location list each shows a distinct error message. The search hint row also shows a loading state while the list is being fetched.
 - The rainfall, weather, risk, trend, map, and alert values are examples only; no live lookup or prediction is performed. A live weather forecast is not connected.
+- To regenerate the location index from upstream data, run `node scripts/build-location-index.mjs <path-to-source.json>` (source: [prasad-gowda/india-state-district-cities](https://github.com/prasad-gowda/india-state-district-cities), derived from citypopulation.de / Census of India).
 
-## Landing page and Firebase authentication
+## Public dashboard (no login)
 
-- The landing page opens at `/` (or `#/`) and provides links to sign up, sign in, and explicitly explore the demo dashboard.
+- The dashboard is the default view and is fully public — no sign-in is required. Opening the app (root or `#/`) shows the live flood-risk dashboard directly.
+- The marketing landing page remains available at `#/landing`, and optional Firebase login/sign-up remain at `#/login` and `#/signup` for anyone who wants an account. They are not required to use the dashboard.
+
+## Flood-risk engine, data sources, and limitations
+
+- **Weather:** [Open-Meteo](https://open-meteo.com/) forecast API (no API key). Provides current conditions, hourly precipitation, and a multi-day precipitation forecast. The last-updated timestamp is shown in the dashboard.
+- **Official warnings:** India Meteorological Department (IMD) district-wise colour warnings, published as a public GIS layer on IMD's GeoServer. Colour meanings follow IMD: red = warning/take action, orange = alert/be prepared, yellow = watch/be updated, green = no warning. The source and issue timestamp are shown whenever warnings are available.
+- **Risk categories:** Low, Moderate, High, Severe. The 24-hour rainfall classes reuse the IMD public rainfall-intensity classification. The score weights and the 72-hour accumulation bands are **provisional design choices** and are labelled as such in the UI.
+- **This is a transparent, rules-based heuristic — not a validated AI model or flood forecast.** It has not been calibrated against historical flood records. A weather-based estimate is never presented as an official warning or a confirmed flood event, and official IMD warnings are always shown separately with their source and timestamp.
+- **Missing, stale, or unavailable data is never replaced with demo values.** If live weather is missing, stale (older than 2 hours), or lacks rainfall inputs, no risk score is shown and the reason is explained. If official warnings cannot be reached, that is stated explicitly rather than inventing alerts.
+- **Tests:** `npm test` runs the engine unit tests (`node --test`) covering normal conditions, heavy rainfall, missing data, stale data, and official-warning handling.
+
+## Optional Firebase authentication
+
 - Login and sign-up are available at `#/login` and `#/signup`. With Firebase configured, they create accounts, sign in, and send password-reset emails through Firebase Authentication. The app never writes passwords to browser storage; Firebase handles credential exchange and authentication session tokens.
 - The login **Remember me** checkbox selects Firebase's local session persistence. When unchecked, the session uses session persistence. These settings control Firebase's sign-in session, not password storage.
-- The demo dashboard's **Log out** action signs out of Firebase when an authenticated user is signed in, then returns to the landing page. The separate demo-dashboard entry remains available without an account.
+- These pages are optional; the dashboard itself requires no account.
 
 ### Configure Firebase once
 
@@ -65,8 +80,13 @@ Firebase client configuration alone does not create or enable a Firebase project
 
 ## Project files
 
-- `src/App.jsx` — landing, login, sign-up and dashboard views, client-side route navigation, demo datasets, and form/search states.
-- `src/firebase.js` — initializes Firebase only when the required Vite environment settings are present.
+- `src/App.jsx` — public dashboard view, client-side route navigation, India-wide location search, and form/search states.
+- `src/services/weatherService.js` — Open-Meteo geocoding, live weather fetch, and rolling rainfall windows (last/next 24/48/72 h).
+- `src/services/warningsService.js` — IMD official district warning lookup (with a dev/preview proxy) that never fabricates warnings.
+- `src/risk/floodRiskEngine.js` — reusable, dependency-free rules-based flood-risk scoring module (categories, factors, safety guidance, limitations).
+- `tests/floodRiskEngine.test.js` — engine unit tests (`node --test`).
+- `src/firebase.js` — initializes Firebase only when the required Vite environment settings are present (optional).
+- `src/data/india-locations.json` — bundled India location index (states, districts, cities) used by the dashboard search; rebuilt with `scripts/build-location-index.mjs`.
 - `src/App.css` — landing, authentication, dashboard styling and responsive layouts.
 - `src/index.css` — global styles and accessibility defaults.
 - `index.html` — page title and metadata.

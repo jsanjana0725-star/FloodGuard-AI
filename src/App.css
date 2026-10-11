@@ -798,6 +798,7 @@
 .risk-low { --risk-color: #55b491; }
 .risk-moderate { --risk-color: #eab252; }
 .risk-high { --risk-color: #e77663; }
+.risk-severe { --risk-color: #d34a4a; }
 
 .risk-meter-inner {
   position: relative;
@@ -3599,4 +3600,235 @@
     align-items: flex-start;
     flex-direction: column;
   }
+}
+
+/* ---------------------------------------------------------------- live risk */
+
+/* Message shown instead of a score when inputs don't justify one. */
+.risk-unavailable {
+  display: flex;
+  gap: 10px;
+  margin: 16px 4px;
+  padding: 14px;
+  border: 1px dashed #d7e0e8;
+  border-radius: 10px;
+  background: #f7fafc;
+}
+
+.risk-unavailable strong {
+  color: #4a6480;
+  font-size: 11px;
+}
+
+.risk-unavailable p {
+  margin-top: 4px;
+  color: #7a8b9d;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+/* Inline note when an official warning raises the category. */
+.risk-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 4px 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: #b88237;
+  background: #fff6e9;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.risk-note svg {
+  flex: 0 0 auto;
+}
+
+/* Readable sentence explaining the numeric factors. */
+.risk-detail {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  color: #8a99ab;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.risk-detail svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #9fb2c4;
+}
+
+/* ------------------------------------------------------- forecast & data */
+
+.forecast-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.forecast-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 6px;
+  border: 1px solid #eef2f6;
+  border-radius: 10px;
+  background: #f8fbfd;
+  text-align: center;
+}
+
+.forecast-card svg {
+  color: #4b91c3;
+}
+
+.forecast-day {
+  color: #7c8b9d;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.forecast-card strong {
+  color: #2f4c66;
+  font-size: 11px;
+}
+
+.forecast-card small {
+  color: #9aa8b8;
+  font-size: 7px;
+}
+
+/* Source + freshness list under the forecast. */
+.data-notes {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #eff2f6;
+}
+
+.data-notes-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #8b9aab;
+  font-size: 8px;
+}
+
+.data-notes-row svg {
+  flex: 0 0 auto;
+  color: #9db0c2;
+}
+
+/* ----------------------------------------------------------- safety panel */
+
+.safety-panel {
+  margin-top: 15px;
+  padding: 16px;
+  border: 1px solid #e6edf3;
+  border-radius: 12px;
+  background: #fbfdff;
+}
+
+.safety-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.safety-badge {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 9px;
+  color: #2f8f7a;
+  background: #e7f6f1;
+}
+
+.safety-head strong {
+  color: #344c66;
+  font-size: 12px;
+}
+
+.safety-head p {
+  margin-top: 4px;
+  color: #7d8da0;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.safety-list {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.safety-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: #4a6480;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.safety-list svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #55b491;
+}
+
+.safety-limitations {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #eef2f6;
+}
+
+.safety-limitations summary {
+  color: #5b7189;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.safety-limitations ul {
+  display: grid;
+  gap: 6px;
+  margin: 9px 0 0;
+  padding-left: 16px;
+}
+
+.safety-limitations li {
+  color: #8090a2;
+  font-size: 8px;
+  line-height: 1.55;
+}
+
+/* ------------------------------------------------------- rainfall chart */
+
+.trend-footnote {
+  margin-top: 9px;
+  color: #93a2b2;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.chart-bar-empty {
+  min-height: 0 !important;
+  height: 0 !important;
+  background: #eef2f6;
+}
+
+.chart-bar-forecast {
+  background: linear-gradient(180deg, #7fc4f0, #4b91c3);
 }
